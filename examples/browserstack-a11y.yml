@@ -1,0 +1,47 @@
+# Reference consumer workflow for the BrowserStack Accessibility DevTools Action.
+# Copy this to `.github/workflows/browserstack-a11y.yml` in your repository.
+#
+# Trigger: comment `@AccessibilityDevTools` on any pull request.
+name: BrowserStack Accessibility
+
+on:
+  issue_comment:
+    types: [created]
+
+# Least privilege: the workflow's GITHUB_TOKEN stays read-only. Every write
+# (comment, check, SARIF) is posted by the BrowserStack Accessibility App
+# server-side — never by GITHUB_TOKEN.
+permissions:
+  contents: read # read the PR's changed files (diff)
+  pull-requests: read # resolve the PR head SHA + changed files
+  id-token: write # mint the Actions OIDC token that proves the run is genuine CI
+
+# Supersede stale runs on the same PR.
+concurrency:
+  group: a11y-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  a11y:
+    # PR comments only, mentioning @AccessibilityDevTools. The action then
+    # enforces the real commenter permission check (write/maintain/admin) —
+    # author_association is NOT a permission check.
+    if: >
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@AccessibilityDevTools')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Pin the action to a commit SHA at release time (shown as a placeholder here).
+      - uses: browserstack/browserstack-accessibility-devtools-action@<commit-sha> # v1
+        with:
+          username: ${{ secrets.BROWSERSTACK_USERNAME }}
+          access-key: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+          comment: true
+          check-gate: true
+          fail-on-severity: error
+          # inline-suggestions: true
+          # sarif: true             # uploaded by the App server-side; no security-events perm needed here
+          # comment-mode: update
+          # remediation: true       # preview; off by default
+          # ai-agent: coderabbitai  # bare name; the service posts "@coderabbitai"

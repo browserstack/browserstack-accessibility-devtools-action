@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+.env
+# Bundled output is produced by the release pipeline when/if JS entrypoints land.
+dist/

@@ -1,0 +1,76 @@
+# Release pipeline for the BrowserStack Accessibility DevTools Action.
+#
+# v1 is a composite action (action.yml) that shells out to bash + the published
+# CLI, so there is nothing to bundle yet. This pipeline is a STUB that:
+#   - builds any bundled `dist/` if/when the action gains JS entrypoints (esbuild),
+#   - verifies action.yml is valid,
+#   - documents the (manual, admin-only) Marketplace publish step.
+#
+# Marketplace publishing needs a GitHub ORG ADMIN and is intentionally NOT
+# automated here (see the "publish" job note below).
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Bundle a dist/ IF the action grows JS entrypoints (esbuild pattern).
+      # Guarded so the stub is a no-op for the current pure-composite action.
+      - name: Build bundled dist (esbuild)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package.json ] && jq -e '.scripts.build' package.json >/dev/null 2>&1; then
+            npm ci
+            # Example bundling target for a future JS action entrypoint:
+            #   npx esbuild src/index.ts --bundle --platform=node \
+            #     --target=node20 --outfile=dist/index.js
+            npm run build
+            echo "Bundled dist/ produced."
+          else
+            echo "No package.json build script — pure composite action, nothing to bundle."
+          fi
+
+      - name: Validate action.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f action.yml || { echo "action.yml missing"; exit 1; }
+          # Minimal structural sanity: required top-level keys present.
+          for key in name description runs inputs outputs; do
+            grep -qE "^${key}:" action.yml || { echo "action.yml missing '${key}:'"; exit 1; }
+          done
+          echo "action.yml looks structurally valid."
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Marketplace publish (manual, org-admin only)
+        shell: bash
+        run: |
+          echo "GitHub Marketplace publishing is a MANUAL step and requires a GitHub org admin."
+          echo "Steps (performed in the GitHub UI by an admin):"
+          echo "  1. Draft a release for the pushed tag."
+          echo "  2. Tick 'Publish this Action to the GitHub Marketplace'."
+          echo "  3. Select category (Code quality / Utilities), accept the agreement, publish."
+          echo "This job is a placeholder and does not publish automatically."
