@@ -129,9 +129,18 @@ runs:
         echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
 
     # ---------------------------------------------------------------------------
-    # 2. Commenter permission gate (hardcoded — real permission check, NOT
-    #    author_association). The commenter must be write/maintain/admin
-    #    (ADR-0035 §5, review #3).
+    # 2. Commenter permission pre-check (best-effort — the AUTHORITATIVE, fail-closed
+    #    permission check is done server-side by the ci-review-service before it
+    #    posts anything as the App (ADR-0035 §5). This client-side pre-check is a
+    #    fast, quota-saving reject for commenters we can definitively see are not
+    #    write/maintain/admin — it is NOT the security boundary (the runner is the
+    #    customer's and cannot be trusted).
+    #
+    #    Crucially it must degrade, not hard-fail: GET .../collaborators/{user}/
+    #    permission requires push access, which the least-privilege workflow token
+    #    (contents: read) deliberately lacks — so the call 403s under the documented
+    #    read-only setup. Treat an inconclusive read as "proceed" and let the
+    #    server-side gate enforce; only a DEFINITIVE non-privileged role refuses.
     # ---------------------------------------------------------------------------
     - id: permission
       if: steps.guard.outputs.proceed == 'true'
@@ -146,22 +155,36 @@ runs:
           echo "::error::Could not resolve the commenter login."
           exit 1
         fi
-        # GET /repos/{owner}/{repo}/collaborators/{username}/permission
-        perm="$(gh api "repos/${repo}/collaborators/${actor}/permission" --jq '.permission' 2>/dev/null || echo "none")"
-        echo "Commenter ${actor} has permission: ${perm}"
-        case "$perm" in
-          admin|maintain|write) echo "allowed=true" >> "$GITHUB_OUTPUT" ;;
-          *)
-            echo "::warning::${actor} lacks write/maintain/admin permission; refusing to scan."
-            echo "allowed=false" >> "$GITHUB_OUTPUT"
-            ;;
-        esac
+        # GET /repos/{owner}/{repo}/collaborators/{username}/permission needs push
+        # access. Distinguish a definitive answer from an inconclusive call: on a
+        # read-only token the call fails (gh exits non-zero) and we must NOT refuse.
+        if perm="$(gh api "repos/${repo}/collaborators/${actor}/permission" --jq '.permission' 2>/dev/null)"; then
+          echo "Commenter ${actor} has permission: ${perm}"
+          case "$perm" in
+            admin|maintain|write)
+              echo "allowed=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::warning::${actor} lacks write/maintain/admin permission; refusing to scan."
+              echo "allowed=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+        else
+          # Could not read the commenter's permission (expected with the documented
+          # read-only GITHUB_TOKEN, which cannot call the collaborators API). Do not
+          # hard-refuse — proceed and rely on the server-side fail-closed gate, which
+          # rejects unauthorized commenters before the App posts (ADR-0035 §5).
+          echo "::warning::Could not read ${actor}'s permission with the read-only workflow token; relying on the server-side permission gate."
+          echo "allowed=true" >> "$GITHUB_OUTPUT"
+        fi
 
     # ---------------------------------------------------------------------------
-    # 3. Fork-PR / restricted-token safety (ADR-0035 §7): "diff, don't build".
-    #    If the SA creds or the Actions OIDC endpoint are unavailable (e.g. a fork
-    #    PR with a restricted token), degrade to a clear SKIP — never run with
-    #    reduced trust.
+    # 3. Preflight (ADR-0035 §7). Fork-PR safety does NOT come from this step:
+    #    issue_comment workflows run in the BASE-repo context, so SA secrets and
+    #    id-token are available even when the comment is on a fork PR. Fork safety
+    #    comes from (a) the commenter permission gate above + the server-side
+    #    fail-closed gate, and (b) "diff, don't build" — the secret-bearing job
+    #    never executes PR head code (step 6). This step only ensures the scan has
+    #    what it needs and skips cleanly when it does not (creds not configured, or
+    #    id-token: write not granted) — never run with reduced trust.
     # ---------------------------------------------------------------------------
     - id: preflight
       if: steps.guard.outputs.proceed == 'true' && steps.permission.outputs.allowed == 'true'
@@ -174,14 +197,14 @@ runs:
         ready=true
 
         if [ -z "${BSTACK_USERNAME}" ] || [ -z "${BSTACK_ACCESS_KEY}" ]; then
-          echo "::warning::Service Account credentials are not available (likely a fork PR with a restricted token). Skipping scan."
+          echo "::warning::Service Account credentials are not available (secrets not configured on this repo). Skipping scan."
           ready=false
         fi
 
-        # The OIDC request env is only present when the job has id-token: write
-        # AND the token isn't restricted (forks). Belt-and-suspenders vs §7.
+        # ACTIONS_ID_TOKEN_REQUEST_* are present only when the job was granted
+        # id-token: write. Required to prove the run is genuine CI (ADR-0035 §5).
         if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
-          echo "::warning::Actions OIDC token endpoint unavailable (fork PR / missing id-token: write). Skipping scan — will not run with reduced trust."
+          echo "::warning::Actions OIDC token endpoint unavailable (missing 'id-token: write' permission). Skipping scan — will not run with reduced trust."
           ready=false
         fi
 
