@@ -59,8 +59,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # Pin the action to a commit SHA (shown as @v1 for brevity).
-      - uses: browserstack/browserstack-accessibility-devtools-action@<commit-sha>
+      # @v1 tracks the latest v1.x; pin to a full commit SHA for supply-chain hardening.
+      - uses: browserstack/browserstack-accessibility-devtools-action@v1
         with:
           username: ${{ secrets.BROWSERSTACK_USERNAME }}
           access-key: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}

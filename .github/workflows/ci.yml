@@ -1,0 +1,38 @@
+# PR gate for the composite action. Keeps action.yml + example/workflow YAML
+# structurally valid on every change so a broken action can't merge.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate YAML is well-formed
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in action.yml examples/*.yml .github/workflows/*.yml; do
+            python3 -c "import sys,yaml; list(yaml.safe_load_all(open('$f')))" \
+              && echo "ok: $f" || { echo "invalid YAML: $f"; exit 1; }
+          done
+
+      - name: Validate action.yml structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f action.yml || { echo "action.yml missing"; exit 1; }
+          for key in name description runs inputs outputs; do
+            grep -qE "^${key}:" action.yml || { echo "action.yml missing '${key}:'"; exit 1; }
+          done
+          grep -qE "using: 'composite'|using: composite" action.yml \
+            || { echo "action.yml must be a composite action"; exit 1; }
+          echo "action.yml is structurally valid."
