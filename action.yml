@@ -284,7 +284,7 @@ runs:
     # 7. Run the PINNED published CLI in PR-scan mode over the diff.
     #    IMPORTANT: the CLI version is pinned by THIS Action release (no @latest at
     #    runtime — ADR-0035 §2, review #4). Update CLI_VERSION when cutting a new
-    #    Action release. `1.3.0` is a PLACEHOLDER pending the CLI PR-scan release.
+    #    Action release. Pinned to the published 1.5.0 (npmjs `latest`), which ships PR-scan mode.
     #    We run the pinned package directly with npx --yes so no project install /
     #    postinstall of the PR head executes.
     # ---------------------------------------------------------------------------
@@ -300,8 +300,8 @@ runs:
         HEAD_SHA: ${{ steps.pr.outputs.head-sha }}
       run: |
         set -euo pipefail
-        # PLACEHOLDER version — pinned by the Action release (§2). Do NOT use @latest.
-        CLI_VERSION="1.3.0"
+        # Pinned published CLI version (npmjs latest = 1.5.0; includes PR-scan mode). Do NOT use @latest.
+        CLI_VERSION="1.5.0"
         FINDINGS_OUT="${RUNNER_TEMP}/findings.json"
 
         echo "Running @browserstack/accessibility-devtools@${CLI_VERSION} in PR-scan mode (diff scope)…"
@@ -320,15 +320,15 @@ runs:
     # ---------------------------------------------------------------------------
     # 8. Request the Actions OIDC token with the DevA11y audience (ADR-0035 §5).
     #    Proves "this request came from a real Actions run in repo X" — repo
-    #    granularity, no user resolved. Audience is a PLACEHOLDER pending
-    #    provisioning of the ci-review-service verifier.
+    #    granularity, no user resolved. Audience matches the deployed
+    #    ci-review-service verifier config.
     # ---------------------------------------------------------------------------
     - id: oidc
       if: steps.preflight.outputs.ready == 'true'
       shell: bash
       run: |
         set -euo pipefail
-        # PLACEHOLDER audience — must match the ci-review-service verifier config.
+        # DevA11y OIDC audience — matches the ci-review-service verifier config (oidc.audience).
         AUDIENCE="browserstack-accessibility-devtools"
         token="$(curl -sf \
           -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
@@ -345,7 +345,7 @@ runs:
     # 9. Submit findings + scanProof + OIDC token to the ci-review-service.
     #    The service verifies origin (OIDC) + content (scanProof) and posts AS THE
     #    APP. The Action never posts to GitHub directly (ADR-0035 §3, §5).
-    #    The service base URL is a PLACEHOLDER, NOT a customer input.
+    #    The service base URL is fixed (global ingress), NOT a customer input.
     # ---------------------------------------------------------------------------
     - id: submit
       if: steps.preflight.outputs.ready == 'true'
@@ -366,8 +366,8 @@ runs:
         OPT_AI_AGENT: ${{ inputs.ai-agent }}
       run: |
         set -euo pipefail
-        # PLACEHOLDER base URL — resolved server-side per data-residency region
-        # (ADR-0035 §7); NOT a customer input.
+        # Service base URL (global ingress); server-side geo-routes per data-residency
+        # region (ADR-0035 §7). NOT a customer input.
         SERVICE_URL="https://devtools-a11y-linter.browserstack.com"
         RESP_OUT="${RUNNER_TEMP}/service-response.json"
 
