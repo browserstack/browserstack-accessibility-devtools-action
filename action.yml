@@ -281,198 +281,102 @@ runs:
         node-version: '20'
 
     # ---------------------------------------------------------------------------
-    # 7. Run the PINNED published CLI in PR-scan mode over the diff.
-    #    IMPORTANT: the CLI version is pinned by THIS Action release (no @latest at
-    #    runtime — ADR-0035 §2, review #4). Update CLI_VERSION when cutting a new
-    #    Action release. Pinned to the published 1.5.0 (npmjs `latest`), which ships PR-scan mode.
-    #    We run the pinned package directly with npx --yes so no project install /
-    #    postinstall of the PR head executes.
+    # 7. Run the pinned, published CLI in PR-scan mode.
+    #    In --pr-scan the CLI does the whole flow itself: resolves the base..head
+    #    diff LOCALLY (git), sends only the changed files' contents to linter-server
+    #    (which normalizes + HMAC-signs the findings as a scanProof), mints the
+    #    Actions OIDC token from ACTIONS_ID_TOKEN_REQUEST_* (needs id-token: write),
+    #    and submits to the ci-review-service (POST <ci-service-url>/v1/findings),
+    #    which verifies origin + content and posts AS THE APP. No project build /
+    #    postinstall of PR-head code ever runs.
+    #
+    #    CLI_VERSION is pinned by THIS Action release (never @latest at runtime).
     # ---------------------------------------------------------------------------
     - id: scan
       if: steps.preflight.outputs.ready == 'true'
       shell: bash
       env:
-        # SA creds — passed to the CLI, which authenticates over WSS to linter-server.
+        # SA creds — the CLI authenticates over WSS to linter-server with these.
         BROWSERSTACK_USERNAME: ${{ inputs.username }}
         BROWSERSTACK_ACCESS_KEY: ${{ inputs.access-key }}
-        CHANGED_FILES: ${{ steps.pr.outputs.changed-files }}
-        BASE_SHA: ${{ steps.pr.outputs.base-sha }}
-        HEAD_SHA: ${{ steps.pr.outputs.head-sha }}
-      run: |
-        set -euo pipefail
-        # Pinned published CLI version (npmjs latest = 1.5.0; includes PR-scan mode). Do NOT use @latest.
-        CLI_VERSION="1.5.0"
-        FINDINGS_OUT="${RUNNER_TEMP}/findings.json"
-
-        echo "Running @browserstack/accessibility-devtools@${CLI_VERSION} in PR-scan mode (diff scope)…"
-        # --scope=diff (ADR-0022): scan only changed ranges over base…head.
-        # The CLI reads file contents; it does NOT execute the project.
-        npx --yes "@browserstack/accessibility-devtools@${CLI_VERSION}" scan \
-          --scope=diff \
-          --base "${BASE_SHA}" \
-          --head "${HEAD_SHA}" \
-          --changed-files "${CHANGED_FILES}" \
-          --output "${FINDINGS_OUT}" \
-          --format json
-
-        echo "findings-file=${FINDINGS_OUT}" >> "$GITHUB_OUTPUT"
-
-    # ---------------------------------------------------------------------------
-    # 8. Request the Actions OIDC token with the DevA11y audience (ADR-0035 §5).
-    #    Proves "this request came from a real Actions run in repo X" — repo
-    #    granularity, no user resolved. Audience matches the deployed
-    #    ci-review-service verifier config.
-    # ---------------------------------------------------------------------------
-    - id: oidc
-      if: steps.preflight.outputs.ready == 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        # DevA11y OIDC audience — matches the ci-review-service verifier config (oidc.audience).
-        AUDIENCE="browserstack-accessibility-devtools"
-        token="$(curl -sf \
-          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-          "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | jq -r '.value')"
-        if [ -z "$token" ] || [ "$token" = "null" ]; then
-          echo "::error::Failed to mint the Actions OIDC token."
-          exit 1
-        fi
-        # Mask so it never lands in logs.
-        echo "::add-mask::$token"
-        echo "token=$token" >> "$GITHUB_OUTPUT"
-
-    # ---------------------------------------------------------------------------
-    # 9. Submit findings + scanProof + OIDC token to the ci-review-service.
-    #    The service verifies origin (OIDC) + content (scanProof) and posts AS THE
-    #    APP. The Action never posts to GitHub directly (ADR-0035 §3, §5).
-    #    The service base URL is fixed (global ingress), NOT a customer input.
-    # ---------------------------------------------------------------------------
-    - id: submit
-      if: steps.preflight.outputs.ready == 'true'
-      shell: bash
-      env:
-        OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-        FINDINGS_FILE: ${{ steps.scan.outputs.findings-file }}
+        # scanProof context: {repo, prNumber, headSha}. repo/pr-number are required
+        # by --pr-scan; base is the diff baseline (CI checkouts can't infer it);
+        # head-sha binds the proof to this PR head (defaults to git HEAD otherwise).
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ steps.pr.outputs.pr-number }}
+        BASE_SHA: ${{ steps.pr.outputs.base-sha }}
         HEAD_SHA: ${{ steps.pr.outputs.head-sha }}
-        OPT_COMMENT: ${{ inputs.comment }}
-        OPT_CHECK_GATE: ${{ inputs.check-gate }}
-        OPT_FAIL_ON: ${{ inputs.fail-on-severity }}
-        OPT_INLINE: ${{ inputs.inline-suggestions }}
-        OPT_SARIF: ${{ inputs.sarif }}
-        OPT_COMMENT_MODE: ${{ inputs.comment-mode }}
-        OPT_REMEDIATION: ${{ inputs.remediation }}
-        OPT_AI_AGENT: ${{ inputs.ai-agent }}
+        FAIL_ON: ${{ inputs.fail-on-severity }}
+        # ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN are inherited from the job env
+        # (permissions: id-token: write); the CLI reads them to mint the OIDC token.
       run: |
         set -euo pipefail
-        # Service base URL (global ingress); server-side geo-routes per data-residency
-        # region (ADR-0035 §7). NOT a customer input.
-        SERVICE_URL="https://devtools-a11y-linter.browserstack.com"
-        RESP_OUT="${RUNNER_TEMP}/service-response.json"
+        # Pinned published CLI (npmjs latest = 1.5.0; ships --pr-scan). Do NOT use @latest.
+        CLI_VERSION="1.5.0"
 
-        # The CLI emits { findings, scanProof } — findings are normalized and the
-        # scanProof is HMAC-signed by linter-server (key never on the runner).
-        findings="$(jq -c '.findings // .' "${FINDINGS_FILE}")"
-        scan_proof="$(jq -r '.scanProof // ""' "${FINDINGS_FILE}")"
+        # fail-on-severity=none -> --non-strict: report findings but never fail the
+        # job. `error` is the CLI default (errors -> exit 1). NOTE: CLI 1.5.0 has no
+        # separate "warning" gate, so `warning` currently behaves like `error`.
+        NON_STRICT=()
+        if [ "${FAIL_ON}" = "none" ]; then NON_STRICT=(--non-strict); fi
 
-        # Assemble the request body (ADR-0035 §5 wire shape).
-        body="$(jq -cn \
-          --arg repo "$REPO" \
-          --argjson prNumber "$PR_NUMBER" \
-          --arg headSha "$HEAD_SHA" \
-          --argjson findings "$findings" \
-          --arg scanProof "$scan_proof" \
-          --arg oidcToken "$OIDC_TOKEN" \
-          --arg comment "$OPT_COMMENT" \
-          --arg checkGate "$OPT_CHECK_GATE" \
-          --arg failOnSeverity "$OPT_FAIL_ON" \
-          --arg inlineSuggestions "$OPT_INLINE" \
-          --arg sarif "$OPT_SARIF" \
-          --arg commentMode "$OPT_COMMENT_MODE" \
-          --arg remediation "$OPT_REMEDIATION" \
-          --arg aiAgent "$OPT_AI_AGENT" \
-          '{
-            platform: "github",
-            repo: $repo,
-            prNumber: $prNumber,
-            headSha: $headSha,
-            findings: $findings,
-            scanProof: $scanProof,
-            oidcToken: $oidcToken,
-            options: {
-              comment: ($comment == "true"),
-              checkGate: ($checkGate == "true"),
-              failOnSeverity: $failOnSeverity,
-              inlineSuggestions: ($inlineSuggestions == "true"),
-              sarif: ($sarif == "true"),
-              commentMode: $commentMode,
-              remediation: ($remediation == "true"),
-              aiAgent: $aiAgent
-            }
-          }')"
-
-        http_code="$(curl -sS -o "${RESP_OUT}" -w '%{http_code}' \
-          -X POST "${SERVICE_URL}/v1/findings" \
-          -H "Content-Type: application/json" \
-          -H "X-CI-Platform: github" \
-          --data-binary "${body}")"
-
-        echo "ci-review-service responded HTTP ${http_code}"
-        if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-          echo "::error::ci-review-service rejected the submission (HTTP ${http_code})."
-          cat "${RESP_OUT}" || true
-          exit 1
-        fi
-        echo "response-file=${RESP_OUT}" >> "$GITHUB_OUTPUT"
+        echo "Running @browserstack/accessibility-devtools@${CLI_VERSION} --pr-scan (diff scope)…"
+        set +e
+        npx --yes "@browserstack/accessibility-devtools@${CLI_VERSION}" \
+          --pr-scan \
+          --include '**/*' \
+          --base "${BASE_SHA}" \
+          --head-sha "${HEAD_SHA}" \
+          --repo "${REPO}" \
+          --pr-number "${PR_NUMBER}" \
+          --ci-service-url "https://devtools-a11y-linter.browserstack.com" \
+          "${NON_STRICT[@]}"
+        code=$?
+        set -e
+        echo "scan-exit=${code}" >> "$GITHUB_OUTPUT"
+        echo "CLI exited ${code}"
 
     # ---------------------------------------------------------------------------
-    # 10. Report: surface outputs from the service response and apply the gate.
+    # 8. Report + gate. The CLI already submitted the findings and the App posts
+    #    them; here we only translate the CLI exit code into the job result and the
+    #    optional merge gate. (CLI 1.5.0 --pr-scan does not return per-severity
+    #    counts / comment URL to the runner, nor forward the comment/inline/sarif/
+    #    remediation options — the ci-review-service applies its defaults. Surfacing
+    #    those needs a CLI enhancement.)
     # ---------------------------------------------------------------------------
     - id: report
       if: always()
       shell: bash
       env:
-        RESP_FILE: ${{ steps.submit.outputs.response-file }}
+        SCAN_EXIT: ${{ steps.scan.outputs.scan-exit }}
         PROCEED: ${{ steps.guard.outputs.proceed }}
         ALLOWED: ${{ steps.permission.outputs.allowed }}
         READY: ${{ steps.preflight.outputs.ready }}
         OPT_CHECK_GATE: ${{ inputs.check-gate }}
       run: |
         set -euo pipefail
-
-        # Default (skipped / not-run) outputs.
-        result="pass"; error_count="0"; warning_count="0"; findings_count="0"
-        comment_url=""; sarif_file=""
-
+        result="pass"
         if [ "${PROCEED}" != "true" ] || [ "${ALLOWED:-false}" != "true" ] || [ "${READY:-false}" != "true" ]; then
           echo "::notice::Scan did not run (guard/permission/preflight skip); reporting a neutral pass."
-        elif [ -n "${RESP_FILE:-}" ] && [ -f "${RESP_FILE}" ]; then
-          result="$(jq -r '.result // "pass"' "${RESP_FILE}")"
-          error_count="$(jq -r '.errorCount // 0' "${RESP_FILE}")"
-          warning_count="$(jq -r '.warningCount // 0' "${RESP_FILE}")"
-          findings_count="$(jq -r '.findingsCount // 0' "${RESP_FILE}")"
-          comment_url="$(jq -r '.commentUrl // ""' "${RESP_FILE}")"
-          sarif_file="$(jq -r '.sarifFile // ""' "${RESP_FILE}")"
         else
-          echo "::warning::No service response available; reporting fail."
-          result="fail"
+          case "${SCAN_EXIT:-2}" in
+            0) result="pass" ;;
+            1) result="fail"; echo "::warning::Accessibility errors found." ;;
+            3) result="fail"; echo "::error::Fair-Usage wait budget exhausted (rate limited)." ;;
+            4) result="fail"; echo "::error::Permission denied by the server for this account/commenter." ;;
+            *) result="fail"; echo "::error::Scan failed (CLI exit ${SCAN_EXIT:-unknown})." ;;
+          esac
         fi
-
         {
-          echo "result=$result"
-          echo "error-count=$error_count"
-          echo "warning-count=$warning_count"
-          echo "findings-count=$findings_count"
-          echo "comment-url=$comment_url"
-          echo "sarif-file=$sarif_file"
+          echo "result=${result}"
+          echo "error-count="
+          echo "warning-count="
+          echo "findings-count="
+          echo "comment-url="
+          echo "sarif-file="
         } >> "$GITHUB_OUTPUT"
-
-        echo "Result: ${result} (errors=${error_count}, warnings=${warning_count}, total=${findings_count})"
-        [ -n "$comment_url" ] && echo "Comment: ${comment_url}" || true
-
-        # Gate: fail the job when check-gate is on and the service verdict is fail.
-        if [ "${OPT_CHECK_GATE}" = "true" ] && [ "$result" = "fail" ]; then
-          echo "::error::Accessibility check failed (fail-on-severity gate)."
+        echo "Result: ${result} (CLI exit ${SCAN_EXIT:-n/a})"
+        if [ "${OPT_CHECK_GATE}" = "true" ] && [ "${result}" = "fail" ]; then
+          echo "::error::Accessibility check failed (check-gate)."
           exit 1
         fi
