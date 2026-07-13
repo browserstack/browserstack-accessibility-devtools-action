@@ -1,4 +1,4 @@
-# BrowserStack Accessibility for GitHub
+# BrowserStack Accessibility DevTools for GitHub
 
 Catch accessibility issues on your pull requests. Comment
 **`@AccessibilityDevTools`** on a PR and BrowserStack scans the changed code,
@@ -9,12 +9,9 @@ suggestions, and an optional merge check.
 - 💬 **Results on the PR** — a summary comment and inline, one‑click suggestions.
 - ✅ **Optional merge gate** — fail the check when accessibility errors are found.
 - 🤖 **Optional agent hand‑off (preview)** — the findings comment can `@mention` a PR
-  agent you already use, which then acts under _your_ credentials. BrowserStack runs no
-  AI model and never handles your AI keys. **v1 is scan + report**; whether the agent
-  reviews or fixes is up to that agent (see "Optional: agent hand-off" below for what
-  works today).
+  agent you already use, which then acts under _your_ credentials.
 
-Learn more: <https://browserstack.com>
+Learn more: <https://www.browserstack.com/docs/accessibility-dev-tools/features/remediate-github>
 
 ---
 
@@ -27,15 +24,12 @@ Learn more: <https://browserstack.com>
    - `BROWSERSTACK_USERNAME`
    - `BROWSERSTACK_ACCESS_KEY`
 
-   A Service Account is a non‑personal, admin‑managed key built for CI — it uses
-   no user license and can be rotated or revoked independently. (Enterprise plan.)
-
 ## Quick start
 
 Add `.github/workflows/browserstack-a11y.yml`:
 
 ```yaml
-name: BrowserStack Accessibility
+name: BrowserStack Accessibility DevTools
 on:
   issue_comment:
     types: [created]
@@ -59,17 +53,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # @v1 tracks the latest v1.x; pin to a full commit SHA for supply-chain hardening.
-      - uses: browserstack/browserstack-accessibility-devtools-action@v1
+      - uses: browserstack/browserstack-accessibility-devtools-action@main
         with:
           username: ${{ secrets.BROWSERSTACK_USERNAME }}
           access-key: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
           comment: true
           check-gate: true
           fail-on-severity: error
+          # inline-suggestions: true
+          # sarif: true
+          # comment-mode: update
+          # remediation: true       # preview; off by default
+          # ai-agent: coderabbitai  # bare name; the App posts "@coderabbitai"
 ```
-
-A ready-to-copy version lives at [`examples/browserstack-a11y.yml`](examples/browserstack-a11y.yml).
 
 Then, on any pull request, comment:
 
@@ -124,6 +120,9 @@ Set `remediation: true` and name your agent with `ai-agent`. When findings are
 posted, the App `@mentions` that agent on the PR (for example, `@coderabbitai`), and
 **your** agent acts under **your** credentials and billing.
 
+**Prerequisite:** if your agent ignores bot authors by default, allow‑list the
+**BrowserStack Accessibility** bot in its configuration.
+
 ```yaml
 with:
   username: ${{ secrets.BROWSERSTACK_USERNAME }}
@@ -132,35 +131,10 @@ with:
   ai-agent: coderabbitai # BrowserStack posts "@coderabbitai"
 ```
 
-What works today (honest status — this is a preview, off by default):
-
-- BrowserStack **runs no AI model and never stores your AI credentials.**
-- The agent must accept a trigger from a **bot/App** comment.
-  - **CodeRabbit** — responds to the mention, but produces a **review**, not a fix PR.
-  - **Claude** (`claude-code-action` / Anthropic Claude GitHub App) — a genuine fix
-    path, but **not yet reliable** for bot-authored triggers (upstream issues; being
-    validated). Treat as experimental.
-  - **GitHub Copilot's coding agent** — **not supported** (it only acts on comments from
-    a human with write access).
-- If your agent ignores bot authors by default, allow‑list the **BrowserStack
-  Accessibility** bot in its config.
-
-> **v1 is scan + report.** A guaranteed AI-_fix_ path is not part of v1; the hand-off
-> above is a preview and is a **silent no-op** if the agent isn't configured to accept it.
-
-## Privacy & security
-
-- Uses a **Service Account** key (not a personal login); store it as an encrypted
-  Actions secret and rotate via your admin.
-- The App's credentials stay on BrowserStack's side — they are **never** placed on
-  your runner.
-- The scan reads only the pull request's changed files.
+> This feature is a preview and is off by default. Hand‑off is supported only if
+> your AI agent accepts triggers from a bot/App comment; behaviour varies by agent,
+> and it is a silent no‑op if the agent isn't configured to accept it.
 
 ## Support
 
-- Product & docs: <https://browserstack.com>
-- Accessibility API reference (including rate limits): <https://www.browserstack.com/docs/accessibility/api>
-
-## License
-
-[MIT](LICENSE)
+- <https://www.browserstack.com/support>

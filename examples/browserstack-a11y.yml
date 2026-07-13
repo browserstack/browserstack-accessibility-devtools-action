@@ -2,7 +2,7 @@
 # Copy this to `.github/workflows/browserstack-a11y.yml` in your repository.
 #
 # Trigger: comment `@AccessibilityDevTools` on any pull request.
-name: BrowserStack Accessibility
+name: BrowserStack Accessibility DevTools
 
 on:
   issue_comment:
@@ -32,9 +32,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      # Use the v1 major tag for automatic patch/minor updates, or pin to a
-      # full commit SHA for supply-chain hardening (recommended for production).
-      - uses: browserstack/browserstack-accessibility-devtools-action@v1
+      # Tracks the latest released Action. Pin to a full commit SHA for
+      # supply-chain hardening (recommended for production).
+      - uses: browserstack/browserstack-accessibility-devtools-action@main
         with:
           username: ${{ secrets.BROWSERSTACK_USERNAME }}
           access-key: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
