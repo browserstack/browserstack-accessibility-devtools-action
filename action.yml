@@ -37,12 +37,20 @@ inputs:
     description: 'Severity at/above which the check fails the run: error | warning | none. Default error. `none` reports without ever failing the run.'
     required: false
     default: 'error'
+  ai-agent:
+    description: >
+      Optional AI remediation hand-off (preview): the BARE name of an agent to
+      @mention on the findings comment (e.g. `coderabbitai`). The App posts
+      "@<name>"; the agent then acts under your own credentials/billing.
+      Supported only if your agent accepts triggers from a bot/App comment.
+      Validated against ^[A-Za-z0-9-]+(\[bot\])?$.
+    required: false
+    default: ''
 
 # The App always posts a single sticky summary comment, inline comments on the
 # offending lines, a Check Run, and a SARIF upload to code-scanning — these are
-# on by default and need no inputs. `fail-on-severity` is the only behavioural
-# knob (it subsumes the old check-gate). AI remediation hand-off is a separate
-# preview and is intentionally not exposed here yet.
+# on by default and need no inputs. `fail-on-severity` is the only gate knob (it
+# subsumes the old check-gate); `ai-agent` is the only other, optional, control.
 
 outputs:
   result:
@@ -185,6 +193,23 @@ runs:
         echo "ready=$ready" >> "$GITHUB_OUTPUT"
 
     # ---------------------------------------------------------------------------
+    # 3b. Validate the optional ai-agent input (bare name; the service prepends
+    #     "@"). Fail fast on a malformed value rather than submitting it.
+    # ---------------------------------------------------------------------------
+    - id: validate-agent
+      if: steps.preflight.outputs.ready == 'true' && inputs.ai-agent != ''
+      shell: bash
+      env:
+        AI_AGENT: ${{ inputs.ai-agent }}
+      run: |
+        set -euo pipefail
+        if ! printf '%s' "${AI_AGENT}" | grep -Eq '^[A-Za-z0-9-]+(\[bot\])?$'; then
+          echo "::error::ai-agent '${AI_AGENT}' is invalid. Use the bare agent name (no @), e.g. coderabbitai."
+          exit 1
+        fi
+        echo "Validated ai-agent: ${AI_AGENT} (the App will post @${AI_AGENT})."
+
+    # ---------------------------------------------------------------------------
     # 4. Resolve the PR head + base SHAs (authoritative, via the API — the
     #    issue_comment payload has no head SHA, and this is uniform across modes).
     # ---------------------------------------------------------------------------
@@ -238,9 +263,13 @@ runs:
         PR_NUMBER: ${{ steps.context.outputs.pr-number }}
         BASE_SHA: ${{ steps.pr.outputs.base-sha }}
         HEAD_SHA: ${{ steps.pr.outputs.head-sha }}
+        AI_AGENT: ${{ inputs.ai-agent }}
       run: |
         set -euo pipefail
         CLI_VERSION="1.5.0"
+        # Optional AI remediation hand-off (validated above).
+        AGENT_ARGS=()
+        if [ -n "${AI_AGENT}" ]; then AGENT_ARGS=(--ai-agent "${AI_AGENT}"); fi
         echo "Running @browserstack/accessibility-devtools@${CLI_VERSION} --pr-scan (diff scope)…"
         set +e
         out="$(npx --yes "@browserstack/accessibility-devtools@${CLI_VERSION}" \
@@ -250,7 +279,8 @@ runs:
           --head-sha "${HEAD_SHA}" \
           --repo "${REPO}" \
           --pr-number "${PR_NUMBER}" \
-          --ci-service-url "https://devtools-a11y-linter.browserstack.com" 2>&1)"
+          --ci-service-url "https://devtools-a11y-linter.browserstack.com" \
+          "${AGENT_ARGS[@]}" 2>&1)"
         code=$?
         set -e
         printf '%s\n' "$out"

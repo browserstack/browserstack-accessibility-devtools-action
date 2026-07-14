@@ -97,6 +97,7 @@ On every scan the App posts, automatically:
 | `username`         | —       | **Required.** Service Account username (store as a secret).                                             |
 | `access-key`       | —       | **Required.** Service Account access key (store as a secret).                                           |
 | `fail-on-severity` | `error` | Fail the check when findings at/above this severity exist: `error`, `warning`, or `none` (never fails). |
+| `ai-agent`         | —       | Optional (preview). Bare agent name to `@mention` for AI remediation hand-off — see below.              |
 
 ## Outputs
 
@@ -107,6 +108,16 @@ On every scan the App posts, automatically:
 | `warning-count`  | Number of warning-severity findings. |
 | `findings-count` | Total findings.                      |
 | `comment-url`    | Link to the posted PR summary comment. |
+
+## AI remediation hand-off (preview)
+
+Set `ai-agent` to the bare name of an agent you already use (e.g. `coderabbitai`).
+When findings are posted, the App `@mentions` it on the comment, and your agent
+acts under **your** own credentials and billing.
+
+> This feature will be supported if your AI agent accepts triggers from a bot/App
+> comment; behaviour varies by agent, and it is a silent no-op if the agent isn't
+> configured to accept it.
 
 ## Support
 
