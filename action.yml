@@ -266,7 +266,7 @@ runs:
         AI_AGENT: ${{ inputs.ai-agent }}
       run: |
         set -euo pipefail
-        CLI_VERSION="1.5.0"
+        CLI_VERSION="1.5.1"
         # Optional AI remediation hand-off (validated above).
         AGENT_ARGS=()
         if [ -n "${AI_AGENT}" ]; then AGENT_ARGS=(--ai-agent "${AI_AGENT}"); fi
