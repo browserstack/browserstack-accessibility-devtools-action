@@ -1,18 +1,15 @@
-# BrowserStack Accessibility DevTools — composite GitHub Action (v1: scan + report)
+# BrowserStack Accessibility DevTools — composite GitHub Action (scan + report)
 #
-# Design of record: ADR-0035 (CI GitHub App integration), ADR-0036 (Service Account
-# auth) — DEVA11Y-463.
-#
-# This is a THIN WRAPPER (ADR-0035 §2). It:
+# A thin wrapper around the published BrowserStack Accessibility CLI. It:
 #   1. triggers automatically on pull_request (opened/synchronize/reopened/
 #      ready_for_review), or manually when someone comments @AccessibilityDevTools
 #      on a PR (with a commenter write/maintain/admin check);
-#   2. runs the PINNED, published CLI (@browserstack/accessibility-devtools) in
-#      PR-scan mode against the base…head DIFF — it never builds/installs the PR
-#      head code (fork-PR "diff, don't build" safety, ADR-0035 §7);
-#   3. mints a repo-scoped Actions OIDC token (post authenticity, ADR-0035 §5);
-#   4. submits the normalized findings + signed scanProof + OIDC token to the
-#      BrowserStack ci-review-service, which verifies and posts AS THE APP.
+#   2. runs the pinned, published CLI (@browserstack/accessibility-devtools)
+#      against the base…head DIFF — it never builds or installs the PR head code
+#      (fork-PR "diff, don't build" safety);
+#   3. mints a repo-scoped Actions OIDC token proving the run came from this CI;
+#   4. submits the findings to BrowserStack, which verifies them and posts the
+#      results back on the PR as the BrowserStack Accessibility App.
 #
 # The Action holds NO GitHub write credential — every write (comment, check,
 # inline comments, SARIF) is done server-side by the App. The workflow's
@@ -28,10 +25,10 @@ branding:
 
 inputs:
   username:
-    description: 'BrowserStack Service Account username (store as an encrypted Actions secret). Scan auth (ADR-0036).'
+    description: 'BrowserStack Service Account username (store as an encrypted Actions secret).'
     required: true
   access-key:
-    description: 'BrowserStack Service Account access key (store as an encrypted Actions secret). Scan auth (ADR-0036).'
+    description: 'BrowserStack Service Account access key (store as an encrypted Actions secret).'
     required: true
   fail-on-severity:
     description: 'Severity at/above which the check fails the run: error | warning | none. Default error. `none` reports without ever failing the run.'
@@ -134,7 +131,7 @@ runs:
 
     # ---------------------------------------------------------------------------
     # 2. Commenter permission pre-check — MANUAL flow only. Best-effort: the
-    #    AUTHORITATIVE, fail-closed check is server-side (ADR-0035 §5). It must
+    #    AUTHORITATIVE, fail-closed check is server-side. It must
     #    degrade, not hard-fail: the read-only workflow token cannot call the
     #    collaborators API, so an inconclusive read means "proceed" and let the
     #    server gate. The automatic flow skips this (the server authorizes the
@@ -170,7 +167,7 @@ runs:
         fi
 
     # ---------------------------------------------------------------------------
-    # 3. Preflight (ADR-0035 §7): Service Account creds + Actions OIDC must be
+    # 3. Preflight: Service Account creds + Actions OIDC must be
     #    available, else skip cleanly — never run with reduced trust.
     # ---------------------------------------------------------------------------
     - id: preflight
@@ -248,10 +245,10 @@ runs:
 
     # ---------------------------------------------------------------------------
     # 6. Run the pinned, published CLI in PR-scan mode. The CLI resolves the
-    #    base..head diff locally, sends only changed-file contents to
-    #    linter-server (which normalizes + HMAC-signs), mints the OIDC token, and
-    #    submits to the ci-review-service, which posts AS THE APP. It prints one
-    #    machine-readable stdout line the report step parses.
+    #    base..head diff locally, sends only the changed-file contents to
+    #    BrowserStack (which normalizes + signs them), mints the OIDC token, and
+    #    submits the findings, which are verified and posted back on the PR as the
+    #    App. It prints one machine-readable stdout line the report step parses.
     # ---------------------------------------------------------------------------
     - id: scan
       if: steps.preflight.outputs.ready == 'true'
