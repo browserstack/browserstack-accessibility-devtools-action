@@ -1,0 +1,47 @@
+# Reference consumer workflow for the BrowserStack Accessibility DevTools Action.
+# Copy this to `.github/workflows/browserstack-a11y.yml` in your repository.
+#
+# Primary trigger: runs automatically on every pull request.
+# Secondary trigger: comment `@AccessibilityDevTools` on a PR to re-run on demand.
+name: BrowserStack Accessibility DevTools
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+# Least privilege: the workflow's GITHUB_TOKEN stays read-only. Every write
+# (comment, inline comments, check, SARIF) is posted by the BrowserStack
+# Accessibility App server-side — never by GITHUB_TOKEN.
+permissions:
+  contents: read # read the PR's changed files (diff)
+  pull-requests: read # resolve the PR head SHA
+  id-token: write # mint the Actions OIDC token that proves the run is genuine CI
+
+# Supersede stale runs on the same PR (either trigger).
+concurrency:
+  group: a11y-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  a11y:
+    # Automatic on pull_request; or a PR comment mentioning the App. The action
+    # enforces the real commenter permission check on the manual path, and the
+    # server enforces a fail-closed permission gate before it posts anything.
+    if: >
+      github.event_name == 'pull_request' ||
+      (github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@AccessibilityDevTools'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Tracks the latest released Action. Pin to a full commit SHA for
+      # supply-chain hardening (recommended for production).
+      - uses: browserstack/browserstack-accessibility-devtools-action@main
+        with:
+          username: ${{ secrets.BROWSERSTACK_USERNAME }}
+          access-key: ${{ secrets.BROWSERSTACK_ACCESS_KEY }}
+          # Fail the check when findings at/above this severity are present:
+          # error (default) | warning | none.
+          fail-on-severity: error

@@ -1,0 +1,356 @@
+# BrowserStack Accessibility DevTools — composite GitHub Action (scan + report)
+#
+# A thin wrapper around the published BrowserStack Accessibility CLI. It:
+#   1. triggers automatically on pull_request (opened/synchronize/reopened/
+#      ready_for_review), or manually when someone comments @AccessibilityDevTools
+#      on a PR (with a commenter write/maintain/admin check);
+#   2. runs the pinned, published CLI (@browserstack/accessibility-devtools)
+#      against the base…head DIFF — it never builds or installs the PR head code
+#      (fork-PR "diff, don't build" safety);
+#   3. mints a repo-scoped Actions OIDC token proving the run came from this CI;
+#   4. submits the findings to BrowserStack, which verifies them and posts the
+#      results back on the PR as the BrowserStack Accessibility App.
+#
+# The Action holds NO GitHub write credential — every write (comment, check,
+# inline comments, SARIF) is done server-side by the App. The workflow's
+# GITHUB_TOKEN stays read-only.
+
+name: 'BrowserStack Accessibility DevTools'
+description: 'Scan a pull request for accessibility issues and report the findings back on the PR.'
+author: 'BrowserStack'
+
+branding:
+  icon: 'check-circle'
+  color: 'orange'
+
+inputs:
+  username:
+    description: 'BrowserStack Service Account username (store as an encrypted Actions secret).'
+    required: true
+  access-key:
+    description: 'BrowserStack Service Account access key (store as an encrypted Actions secret).'
+    required: true
+  fail-on-severity:
+    description: 'Severity at/above which the check fails the run: error | warning | none. Default error. `none` reports without ever failing the run.'
+    required: false
+    default: 'error'
+  ai-agent:
+    description: >
+      Optional AI remediation hand-off (preview): the BARE name of an agent to
+      @mention on the findings comment (e.g. `coderabbitai`). The App posts
+      "@<name>"; the agent then acts under your own credentials/billing.
+      Supported only if your agent accepts triggers from a bot/App comment.
+      Validated against ^[A-Za-z0-9-]+(\[bot\])?$.
+    required: false
+    default: ''
+
+# The App always posts a single sticky summary comment, inline comments on the
+# offending lines, a Check Run, and a SARIF upload to code-scanning — these are
+# on by default and need no inputs. `fail-on-severity` is the only gate knob (it
+# subsumes the old check-gate); `ai-agent` is the only other, optional, control.
+
+outputs:
+  result:
+    description: 'pass or fail.'
+    value: ${{ steps.report.outputs.result }}
+  error-count:
+    description: 'Number of error-severity findings.'
+    value: ${{ steps.report.outputs.error-count }}
+  warning-count:
+    description: 'Number of warning-severity findings.'
+    value: ${{ steps.report.outputs.warning-count }}
+  findings-count:
+    description: 'Total findings.'
+    value: ${{ steps.report.outputs.findings-count }}
+  comment-url:
+    description: 'Link to the posted PR summary comment.'
+    value: ${{ steps.report.outputs.comment-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    # ---------------------------------------------------------------------------
+    # 1. Resolve the trigger. Two entry points:
+    #    - AUTOMATIC (primary): pull_request opened/synchronize/reopened/
+    #      ready_for_review — actor is the PR author, no commenter gate.
+    #    - MANUAL (secondary): an issue_comment on a PR mentioning
+    #      @AccessibilityDevTools — actor is the commenter, gated below.
+    # ---------------------------------------------------------------------------
+    - id: context
+      shell: bash
+      env:
+        TRIGGER_MENTION: '@AccessibilityDevTools'
+      run: |
+        set -euo pipefail
+        event="${GITHUB_EVENT_NAME:-}"
+        proceed=false
+        mode=""
+
+        case "$event" in
+          pull_request|pull_request_target)
+            action="$(jq -r '.action // ""' "$GITHUB_EVENT_PATH")"
+            case "$action" in
+              opened|synchronize|reopened|ready_for_review)
+                proceed=true; mode="auto" ;;
+              *)
+                echo "::notice::pull_request action '${action}' is not scanned; skipping." ;;
+            esac
+            ;;
+          issue_comment)
+            is_pr="$(jq -r '.issue.pull_request // empty' "$GITHUB_EVENT_PATH")"
+            body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
+            if [ -z "$is_pr" ]; then
+              echo "::notice::Comment is not on a pull request; skipping."
+            elif ! printf '%s' "$body" | grep -qF "$TRIGGER_MENTION"; then
+              echo "::notice::Comment does not mention ${TRIGGER_MENTION}; skipping."
+            else
+              proceed=true; mode="comment"
+            fi
+            ;;
+          *)
+            echo "::notice::Unsupported event '${event}'; skipping. Use on: pull_request or on: issue_comment."
+            ;;
+        esac
+
+        if [ "$mode" = "auto" ]; then
+          pr_number="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
+          actor="$(jq -r '.pull_request.user.login // ""' "$GITHUB_EVENT_PATH")"
+        elif [ "$mode" = "comment" ]; then
+          pr_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
+          actor="$(jq -r '.comment.user.login // ""' "$GITHUB_EVENT_PATH")"
+        else
+          pr_number=""; actor=""
+        fi
+
+        {
+          echo "proceed=$proceed"
+          echo "mode=$mode"
+          echo "pr-number=$pr_number"
+          echo "actor=$actor"
+        } >> "$GITHUB_OUTPUT"
+
+    # ---------------------------------------------------------------------------
+    # 2. Commenter permission pre-check — MANUAL flow only. Best-effort: the
+    #    AUTHORITATIVE, fail-closed check is server-side. It must
+    #    degrade, not hard-fail: the read-only workflow token cannot call the
+    #    collaborators API, so an inconclusive read means "proceed" and let the
+    #    server gate. The automatic flow skips this (the server authorizes the
+    #    verified OIDC actor).
+    # ---------------------------------------------------------------------------
+    - id: permission
+      if: steps.context.outputs.proceed == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        MODE: ${{ steps.context.outputs.mode }}
+        ACTOR: ${{ steps.context.outputs.actor }}
+      run: |
+        set -euo pipefail
+        if [ "$MODE" != "comment" ]; then
+          echo "allowed=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        if [ -z "$ACTOR" ]; then
+          echo "::error::Could not resolve the commenter login."
+          exit 1
+        fi
+        if perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ACTOR}/permission" --jq '.permission' 2>/dev/null)"; then
+          echo "Commenter ${ACTOR} has permission: ${perm}"
+          case "$perm" in
+            admin|maintain|write) echo "allowed=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::warning::${ACTOR} lacks write/maintain/admin permission; refusing to scan."
+               echo "allowed=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+        else
+          echo "::warning::Could not read ${ACTOR}'s permission with the read-only token; relying on the server-side permission gate."
+          echo "allowed=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    # ---------------------------------------------------------------------------
+    # 3. Preflight: Service Account creds + Actions OIDC must be
+    #    available, else skip cleanly — never run with reduced trust.
+    # ---------------------------------------------------------------------------
+    - id: preflight
+      if: steps.context.outputs.proceed == 'true' && steps.permission.outputs.allowed == 'true'
+      shell: bash
+      env:
+        BSTACK_USERNAME: ${{ inputs.username }}
+        BSTACK_ACCESS_KEY: ${{ inputs.access-key }}
+      run: |
+        set -euo pipefail
+        ready=true
+        if [ -z "${BSTACK_USERNAME}" ] || [ -z "${BSTACK_ACCESS_KEY}" ]; then
+          echo "::warning::Service Account credentials are not available (secrets not configured). Skipping scan."
+          ready=false
+        fi
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+          echo "::warning::Actions OIDC token endpoint unavailable (missing 'id-token: write'). Skipping scan — will not run with reduced trust."
+          ready=false
+        fi
+        echo "ready=$ready" >> "$GITHUB_OUTPUT"
+
+    # ---------------------------------------------------------------------------
+    # 3b. Validate the optional ai-agent input (bare name; the service prepends
+    #     "@"). Fail fast on a malformed value rather than submitting it.
+    # ---------------------------------------------------------------------------
+    - id: validate-agent
+      if: steps.preflight.outputs.ready == 'true' && inputs.ai-agent != ''
+      shell: bash
+      env:
+        AI_AGENT: ${{ inputs.ai-agent }}
+      run: |
+        set -euo pipefail
+        if ! printf '%s' "${AI_AGENT}" | grep -Eq '^[A-Za-z0-9-]+(\[bot\])?$'; then
+          echo "::error::ai-agent '${AI_AGENT}' is invalid. Use the bare agent name (no @), e.g. coderabbitai."
+          exit 1
+        fi
+        echo "Validated ai-agent: ${AI_AGENT} (the App will post @${AI_AGENT})."
+
+    # ---------------------------------------------------------------------------
+    # 4. Resolve the PR head + base SHAs (authoritative, via the API — the
+    #    issue_comment payload has no head SHA, and this is uniform across modes).
+    # ---------------------------------------------------------------------------
+    - id: pr
+      if: steps.preflight.outputs.ready == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ steps.context.outputs.pr-number }}
+      run: |
+        set -euo pipefail
+        repo="$GITHUB_REPOSITORY"
+        head_sha="$(gh api "repos/${repo}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+        base_sha="$(gh api "repos/${repo}/pulls/${PR_NUMBER}" --jq '.base.sha')"
+        echo "head-sha=$head_sha" >> "$GITHUB_OUTPUT"
+        echo "base-sha=$base_sha" >> "$GITHUB_OUTPUT"
+        echo "Resolved PR #${PR_NUMBER} head=${head_sha}."
+
+    # ---------------------------------------------------------------------------
+    # 5. Check out ONLY the base…head diff. "diff, don't build": no npm install /
+    #    postinstall — the secret-bearing job never executes PR head code.
+    # ---------------------------------------------------------------------------
+    - name: Checkout PR head (read-only, no build)
+      if: steps.preflight.outputs.ready == 'true'
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ steps.pr.outputs.head-sha }}
+        fetch-depth: 0
+        persist-credentials: false
+
+    - name: Setup Node
+      if: steps.preflight.outputs.ready == 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    # ---------------------------------------------------------------------------
+    # 6. Run the pinned, published CLI in PR-scan mode. The CLI resolves the
+    #    base..head diff locally, sends only the changed-file contents to
+    #    BrowserStack (which normalizes + signs them), mints the OIDC token, and
+    #    submits the findings, which are verified and posted back on the PR as the
+    #    App. It prints one machine-readable stdout line the report step parses.
+    # ---------------------------------------------------------------------------
+    - id: scan
+      if: steps.preflight.outputs.ready == 'true'
+      shell: bash
+      env:
+        BROWSERSTACK_USERNAME: ${{ inputs.username }}
+        BROWSERSTACK_ACCESS_KEY: ${{ inputs.access-key }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.context.outputs.pr-number }}
+        BASE_SHA: ${{ steps.pr.outputs.base-sha }}
+        HEAD_SHA: ${{ steps.pr.outputs.head-sha }}
+        AI_AGENT: ${{ inputs.ai-agent }}
+      run: |
+        set -euo pipefail
+        CLI_VERSION="1.5.1"
+        # Optional AI remediation hand-off (validated above).
+        AGENT_ARGS=()
+        if [ -n "${AI_AGENT}" ]; then AGENT_ARGS=(--ai-agent "${AI_AGENT}"); fi
+        echo "Running @browserstack/accessibility-devtools@${CLI_VERSION} --pr-scan (diff scope)…"
+        set +e
+        out="$(npx --yes "@browserstack/accessibility-devtools@${CLI_VERSION}" \
+          --pr-scan \
+          --include '**/*' \
+          --base "${BASE_SHA}" \
+          --head-sha "${HEAD_SHA}" \
+          --repo "${REPO}" \
+          --pr-number "${PR_NUMBER}" \
+          --ci-service-url "https://devtools-a11y-linter.browserstack.com" \
+          "${AGENT_ARGS[@]}" 2>&1)"
+        code=$?
+        set -e
+        printf '%s\n' "$out"
+        # The CLI prints `[deva11y-result] {json}` on success; capture the last one.
+        result_json="$(printf '%s\n' "$out" | grep -o '\[deva11y-result\] .*' | tail -1 | sed 's/^\[deva11y-result\] //')"
+        {
+          echo "scan-exit=${code}"
+          echo "result-json=${result_json}"
+        } >> "$GITHUB_OUTPUT"
+        echo "CLI exited ${code}"
+
+    # ---------------------------------------------------------------------------
+    # 7. Report + gate. Populate outputs from the CLI's result line and fail the
+    #    run per fail-on-severity (error | warning | none). A non-zero CLI exit
+    #    that is not a completed scan (2 ERROR / 3 FUP / 4 PERMISSION) always
+    #    fails.
+    # ---------------------------------------------------------------------------
+    - id: report
+      if: always()
+      shell: bash
+      env:
+        SCAN_EXIT: ${{ steps.scan.outputs.scan-exit }}
+        RESULT_JSON: ${{ steps.scan.outputs.result-json }}
+        PROCEED: ${{ steps.context.outputs.proceed }}
+        ALLOWED: ${{ steps.permission.outputs.allowed }}
+        READY: ${{ steps.preflight.outputs.ready }}
+        FAIL_ON: ${{ inputs.fail-on-severity }}
+      run: |
+        set -euo pipefail
+        error_count=""; warning_count=""; findings_count=""; comment_url=""
+        if [ -n "${RESULT_JSON:-}" ]; then
+          error_count="$(printf '%s' "$RESULT_JSON" | jq -r '.errorCount // ""' 2>/dev/null || echo "")"
+          warning_count="$(printf '%s' "$RESULT_JSON" | jq -r '.warningCount // ""' 2>/dev/null || echo "")"
+          findings_count="$(printf '%s' "$RESULT_JSON" | jq -r '.findingsCount // ""' 2>/dev/null || echo "")"
+          comment_url="$(printf '%s' "$RESULT_JSON" | jq -r '.commentUrl // ""' 2>/dev/null || echo "")"
+        fi
+
+        result="pass"
+        gate_fail=false
+        if [ "${PROCEED}" != "true" ] || [ "${ALLOWED:-false}" != "true" ] || [ "${READY:-false}" != "true" ]; then
+          echo "::notice::Scan did not run (skipped); reporting a neutral pass."
+        elif [ "${SCAN_EXIT:-2}" = "0" ]; then
+          # Completed scan — gate by severity against the counts.
+          ec="${error_count:-0}"; wc="${warning_count:-0}"
+          case "${FAIL_ON}" in
+            none) : ;;
+            warning) if [ "${ec:-0}" -gt 0 ] || [ "${wc:-0}" -gt 0 ]; then result="fail"; fi ;;
+            *) if [ "${ec:-0}" -gt 0 ]; then result="fail"; fi ;;
+          esac
+          if [ "$result" = "fail" ]; then
+            echo "::warning::Accessibility findings at/above '${FAIL_ON}' (errors=${ec}, warnings=${wc})."
+            [ "${FAIL_ON}" != "none" ] && gate_fail=true
+          fi
+        else
+          # Operational failure (2 ERROR / 3 FUP / 4 PERMISSION) — always fail.
+          result="fail"; gate_fail=true
+          case "${SCAN_EXIT}" in
+            3) echo "::error::Fair-Usage wait budget exhausted (rate limited)." ;;
+            4) echo "::error::Permission denied by the server for this account/commenter." ;;
+            *) echo "::error::Scan failed (CLI exit ${SCAN_EXIT:-unknown})." ;;
+          esac
+        fi
+
+        {
+          echo "result=${result}"
+          echo "error-count=${error_count}"
+          echo "warning-count=${warning_count}"
+          echo "findings-count=${findings_count}"
+          echo "comment-url=${comment_url}"
+        } >> "$GITHUB_OUTPUT"
+        echo "Result: ${result} (errors=${error_count:-n/a} warnings=${warning_count:-n/a} findings=${findings_count:-n/a})"
+
+        if [ "$gate_fail" = "true" ]; then
+          echo "::error::Accessibility check failed (fail-on-severity=${FAIL_ON})."
+          exit 1
+        fi
