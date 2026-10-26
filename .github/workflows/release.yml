@@ -31,7 +31,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22.23.4'
 
       # Bundle a dist/ IF the action grows JS entrypoints (esbuild pattern).
       # Guarded so the stub is a no-op for the current pure-composite action.
@@ -43,7 +43,7 @@ jobs:
             npm ci
             # Example bundling target for a future JS action entrypoint:
             #   npx esbuild src/index.ts --bundle --platform=node \
-            #     --target=node20 --outfile=dist/index.js
+            #     --target=node22 --outfile=dist/index.js
             npm run build
             echo "Bundled dist/ produced."
           else
